@@ -1,37 +1,49 @@
+# ── 第一部分：接收器（数据从哪里进来）──────────────────────
+# Claude Code 通过 OTLP 协议将指标和日志推送到这里
 receivers:
   otlp:
     protocols:
       grpc:
-        endpoint: 0.0.0.0:4317
+        endpoint: 0.0.0.0:4317  # 监听所有网卡的 4317 端口（gRPC 协议，推荐）
       http:
-        endpoint: 0.0.0.0:4318
+        endpoint: 0.0.0.0:4318  # 监听所有网卡的 4318 端口（HTTP 协议，备用）
 
+# ── 第二部分：处理器（数据加工）────────────────────────────
 processors:
-  # Add resource attributes for better analysis
+  # 给每条数据附加额外属性，便于在 Grafana 中按环境筛选
   resource:
     attributes:
       - key: environment
         value: "production"
-        action: upsert
+        action: upsert  # 插入或覆盖 environment="production" 标签
 
+# ── 第三部分：导出器（数据往哪里送）────────────────────────
 exporters:
+  # 暴露一个 HTTP 端点供 Prometheus 定期来抓取指标（Pull 模式）
   prometheus:
     endpoint: "0.0.0.0:8889"
 
+  # 把收到的数据打印到 Collector 控制台日志，用于调试
   debug:
     verbosity: normal
 
+  # 将日志通过 HTTP 主动推送给 Loki（Push 模式）
+  # loki 是 Docker 内部服务名，容器间直接通信
   otlphttp:
     endpoint: http://loki:3100/otlp
 
+# ── 第四部分：管道（把上面三部分串联起来）──────────────────
+# 数据流：receivers → processors → exporters
 service:
   pipelines:
-    metrics: 
+    # 指标管道：Claude Code 的性能/成本/用量指标
+    metrics:
       receivers: [otlp]
       processors: [resource]
-      exporters: [prometheus, debug]
-    
-    logs:    
+      exporters: [prometheus, debug]  # 指标 → Prometheus + 控制台
+
+    # 日志管道：Claude Code 的事件日志（tool_result、api_request 等）
+    logs:
       receivers: [otlp]
       processors: [resource]
-      exporters: [debug, otlphttp] 
+      exporters: [debug, otlphttp]    # 日志 → Loki + 控制台 

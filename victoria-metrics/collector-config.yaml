@@ -1,0 +1,44 @@
+# ── 接收器 ──────────────────────────────────────────────
+# Claude Code 通过 OTLP 协议推送指标和日志到这里
+receivers:
+  otlp:
+    protocols:
+      grpc:
+        endpoint: 0.0.0.0:4317
+      http:
+        endpoint: 0.0.0.0:4318
+
+# ── 处理器 ──────────────────────────────────────────────
+processors:
+  resource:
+    attributes:
+      - key: environment
+        value: "production"
+        action: upsert
+
+# ── 导出器 ──────────────────────────────────────────────
+exporters:
+  # 主动推送指标到 VictoriaMetrics（Push 模式，替代原来被动等 Prometheus 抓取的方式）
+  # VictoriaMetrics 兼容 Prometheus Remote Write 协议，不支持配置多个地址，需要注意
+  prometheusremotewrite:
+    endpoint: http://<你的VictoriaMetrics地址>:8428/api/v1/write
+
+  debug:
+    verbosity: normal
+
+  # 日志推送给 Loki
+  otlphttp:
+    endpoint: http://loki:3100/otlp
+
+# ── 管道 ────────────────────────────────────────────────
+service:
+  pipelines:
+    metrics:
+      receivers: [otlp]
+      processors: [resource]
+      exporters: [prometheusremotewrite, debug]  # 指标 → VictoriaMetrics + 控制台
+
+    logs:
+      receivers: [otlp]
+      processors: [resource]
+      exporters: [debug, otlphttp]               # 日志 → Loki + 控制台
