@@ -1,0 +1,104 @@
+[
+  {
+    "metric": {
+      "__name__": "claude_code_lines_of_code_count_total",
+      "job": "claude-code",
+      "otel_scope_name": "com.anthropic.claude_code",
+      "otel_scope_version": "2.1.88",
+      "session_id": "4b410a78-5137-4aa3-99b5-435a35dcc917",
+      "terminal_type": "non-interactive",
+      "type": "added",
+      "user_id": "3c179c9950f3871802353f98bf74145295009d2a03c6ecfb8bc011f194c76512"
+    },
+    "value": [
+      1774951219.455,
+      "169"
+    ],
+    "group": 1
+  },
+  {
+    "metric": {
+      "__name__": "claude_code_lines_of_code_count_total",
+      "job": "claude-code",
+      "otel_scope_name": "com.anthropic.claude_code",
+      "otel_scope_version": "2.1.88",
+      "session_id": "a2e1b561-ef97-431a-b948-d9504c61d478",
+      "terminal_type": "non-interactive",
+      "type": "added",
+      "user_id": "3c179c9950f3871802353f98bf74145295009d2a03c6ecfb8bc011f194c76512"
+    },
+    "value": [
+      1774951219.455,
+      "159"
+    ],
+    "group": 1
+  },
+  {
+    "metric": {
+      "__name__": "claude_code_lines_of_code_count_total",
+      "job": "claude-code",
+      "otel_scope_name": "com.anthropic.claude_code",
+      "otel_scope_version": "2.1.88",
+      "session_id": "a9074e2b-db1f-41e3-87ff-42b6aeddcbf8",
+      "terminal_type": "non-interactive",
+      "type": "added",
+      "user_id": "3c179c9950f3871802353f98bf74145295009d2a03c6ecfb8bc011f194c76512"
+    },
+    "value": [
+      1774951219.455,
+      "526"
+    ],
+    "group": 1
+  },
+  {
+    "metric": {
+      "__name__": "claude_code_lines_of_code_count_total",
+      "job": "claude-code",
+      "otel_scope_name": "com.anthropic.claude_code",
+      "otel_scope_version": "2.1.88",
+      "session_id": "4b410a78-5137-4aa3-99b5-435a35dcc917",
+      "terminal_type": "non-interactive",
+      "type": "removed",
+      "user_id": "3c179c9950f3871802353f98bf74145295009d2a03c6ecfb8bc011f194c76512"
+    },
+    "value": [
+      1774951219.455,
+      "0"
+    ],
+    "group": 1
+  },
+  {
+    "metric": {
+      "__name__": "claude_code_lines_of_code_count_total",
+      "job": "claude-code",
+      "otel_scope_name": "com.anthropic.claude_code",
+      "otel_scope_version": "2.1.88",
+      "session_id": "a2e1b561-ef97-431a-b948-d9504c61d478",
+      "terminal_type": "non-interactive",
+      "type": "removed",
+      "user_id": "3c179c9950f3871802353f98bf74145295009d2a03c6ecfb8bc011f194c76512"
+    },
+    "value": [
+      1774951219.455,
+      "0"
+    ],
+    "group": 1
+  },
+  {
+    "metric": {
+      "__name__": "claude_code_lines_of_code_count_total",
+      "job": "claude-code",
+      "otel_scope_name": "com.anthropic.claude_code",
+      "otel_scope_version": "2.1.88",
+      "session_id": "a9074e2b-db1f-41e3-87ff-42b6aeddcbf8",
+      "terminal_type": "non-interactive",
+      "type": "removed",
+      "user_id": "3c179c9950f3871802353f98bf74145295009d2a03c6ecfb8bc011f194c76512"
+    },
+    "value": [
+      1774951219.455,
+      "0"
+    ],
+    "group": 1
+  }
+]

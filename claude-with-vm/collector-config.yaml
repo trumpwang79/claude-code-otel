@@ -5,22 +5,14 @@ receivers:
     protocols:
       grpc:
         endpoint: 0.0.0.0:4317
-      http:
-        endpoint: 0.0.0.0:4318
 
-# ── 处理器 ──────────────────────────────────────────────
-processors:
-  resource:
-    attributes:
-      - key: environment
-        value: "production"
-        action: upsert
 
 # ── 导出器 ──────────────────────────────────────────────
 exporters:
-  # 指标通过 Prometheus Remote Write 协议推送到 VictoriaMetrics
+  # 指标通过 Prometheus Remote Write 推送到 vminsert
+  # 客户端需设置 OTEL_EXPORTER_OTLP_METRICS_TEMPORALITY_PREFERENCE=cumulative
   prometheusremotewrite:
-    endpoint: http://victoriametrics:8428/api/v1/write
+    endpoint: http://172.18.0.1:8480/insert/0/prometheus/
 
   debug:
     verbosity: normal
@@ -34,10 +26,8 @@ service:
   pipelines:
     metrics:
       receivers: [otlp]
-      processors: [resource]
-      exporters: [prometheusremotewrite, debug]  # 指标 → VictoriaMetrics + 控制台
+      exporters: [prometheusremotewrite, debug]    # 指标 → VictoriaMetrics + 控制台
 
     logs:
       receivers: [otlp]
-      processors: [resource]
-      exporters: [debug, otlphttp]               # 日志 → Loki + 控制台
+      exporters: [debug, otlphttp]                 # 日志 → Loki + 控制台
