@@ -11,14 +11,14 @@ receivers:
 exporters:
   # 指标通过 Prometheus Remote Write 推送到 vminsert
   # 客户端需设置 OTEL_EXPORTER_OTLP_METRICS_TEMPORALITY_PREFERENCE=cumulative
-  prometheusremotewrite:
-    endpoint: http://172.18.0.1:8480/insert/0/prometheus/
+  otlphttp/vm:
+    endpoint: http://172.18.0.1:8480/insert/0/opentelemetry/
 
   debug:
     verbosity: normal
 
   # 日志推送给 Loki
-  otlphttp:
+  otlphttp/loki:
     endpoint: http://loki:3100/otlp
 
 # ── 管道 ────────────────────────────────────────────────
@@ -26,8 +26,8 @@ service:
   pipelines:
     metrics:
       receivers: [otlp]
-      exporters: [prometheusremotewrite, debug]    # 指标 → VictoriaMetrics + 控制台
+      exporters: [otlphttp/vm, debug]    # 指标 → VictoriaMetrics + 控制台
 
     logs:
       receivers: [otlp]
-      exporters: [debug, otlphttp]                 # 日志 → Loki + 控制台
+      exporters: [debug, otlphttp/loki]                 # 日志 → Loki + 控制台
