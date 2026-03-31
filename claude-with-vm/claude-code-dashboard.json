@@ -152,7 +152,7 @@
             "type": "prometheus",
             "uid": "victoriametrics"
           },
-          "expr": "sum(increase(claude_code_cost_usage_USD_total{}[1h]))",
+          "expr": "sum(increase_pure(claude_code_cost_usage_USD_total{}[1h]))",
           "interval": "",
           "legendFormat": "Cost (1h)",
           "refId": "A"
@@ -218,7 +218,7 @@
             "type": "prometheus",
             "uid": "victoriametrics"
           },
-          "expr": "sum(increase(claude_code_token_usage_tokens_total{}[1h]))",
+          "expr": "sum(increase_pure(claude_code_token_usage_tokens_total{}[1h]))",
           "interval": "",
           "legendFormat": "Tokens (1h)",
           "refId": "A"
@@ -284,7 +284,7 @@
             "type": "prometheus",
             "uid": "victoriametrics"
           },
-          "expr": "sum(increase(claude_code_lines_of_code_count_total{}[1h]))",
+          "expr": "sum(increase_pure(claude_code_lines_of_code_count_total{}[1h]))",
           "interval": "",
           "legendFormat": "Lines Changed (1h)",
           "refId": "A"
@@ -379,7 +379,7 @@
             "type": "prometheus",
             "uid": "victoriametrics"
           },
-          "expr": "sum by (model) (increase(claude_code_cost_usage_USD_total{}[$__interval]))",
+          "expr": "sum by (model) (increase_pure(claude_code_cost_usage_USD_total{}[$__interval]))",
           "interval": "",
           "legendFormat": "{{model}}",
           "refId": "A"
@@ -546,7 +546,7 @@
             "type": "prometheus",
             "uid": "victoriametrics"
           },
-          "expr": "sum by (type) (increase(claude_code_token_usage_tokens_total{}[$__interval]))",
+          "expr": "sum by (type) (increase_pure(claude_code_token_usage_tokens_total{}[$__interval]))",
           "interval": "",
           "legendFormat": "{{type}}",
           "refId": "A"
@@ -1366,7 +1366,7 @@
             "type": "prometheus",
             "uid": "victoriametrics"
           },
-          "expr": "sum by (type) (increase(claude_code_lines_of_code_count_total{}[$__interval]))",
+          "expr": "sum by (type) (increase_pure(claude_code_lines_of_code_count_total{}[$__interval]))",
           "interval": "",
           "legendFormat": "{{type}}",
           "refId": "A"
@@ -1455,7 +1455,7 @@
             "type": "prometheus",
             "uid": "victoriametrics"
           },
-          "expr": "sum(increase(claude_code_commit_count_total{}[1h])) or vector(0)",
+          "expr": "sum(increase_pure(claude_code_commit_count_total{}[1h])) or vector(0)",
           "interval": "",
           "legendFormat": "Commits",
           "refId": "A"
@@ -1465,7 +1465,7 @@
             "type": "prometheus",
             "uid": "victoriametrics"
           },
-          "expr": "sum(increase(claude_code_pull_request_count_total{}[1h])) or vector(0)",
+          "expr": "sum(increase_pure(claude_code_pull_request_count_total{}[1h])) or vector(0)",
           "interval": "",
           "legendFormat": "Pull Requests",
           "refId": "B"
