@@ -1,0 +1,453 @@
+# Claude Code 指标监控方案设计文档
+
+| 信息项   | 内容                                                                                 |
+| -------- | ------------------------------------------------------------------------------------ |
+| 文档版本 | v1.0                                                                                 |
+| 创建日期 | 2026-03-31                                                                           |
+| 作者     |                                                                                      |
+| 状态     | 预研 / Draft                                                                         |
+| 参考来源 | [Claude Code 官方可观测性文档](https://code.claude.com/docs/en/monitoring-usage)      |
+|          | [开源项目 ColeMurray/claude-code-otel](https://github.com/ColeMurray/claude-code-otel) |
+
+---
+
+## 1. 背景与目标
+
+### 1.1 背景
+
+Claude Code 是 Anthropic 提供的 AI 编程助手，在日常开发中被广泛使用。随着团队使用规模的扩大，我们面临以下管理需求：
+
+- **成本管控**：每个模型的 API 调用费用不同，需掌握团队整体开销与趋势
+- **使用度量**：了解 Claude Code 被哪些人、以何种频率、在什么场景下使用
+- **效能评估**：量化 AI 辅助编程对研发效率的提升效果
+- **性能监控**：及时发现 API 延迟飙高、报错率上升等异常
+
+### 1.2 目标
+
+基于 Claude Code 原生支持的 OpenTelemetry（OTel）遥测能力，搭建一套端到端的可观测性监控平台，实现以下核心目标：
+
+1. **实时采集**：自动采集 Claude Code 产生的 Metrics（指标）和 Events（事件日志）
+2. **可靠存储**：将指标写入 Prometheus 时序数据库，事件写入 Loki 日志聚合系统
+3. **成本分析**：按模型、用户、时段维度的数据落盘，支撑后续成本分析
+4. **工具洞察**：工具调用频次、成功率与耗时数据的采集与存储
+
+---
+
+## 2. 整体架构
+
+### 2.1 架构总览
+
+```
+┌──────────────┐       OTLP (gRPC/HTTP)       ┌──────────────────────┐
+│              │ ──────────────────────────────▶│                      │
+│  Claude Code │   Metrics + Events (Logs)     │  OpenTelemetry       │
+│  (各开发者)   │                               │  Collector           │
+│              │                               │  :4317(gRPC)         │
+└──────────────┘                               │  :4318(HTTP)         │
+                                               └──────┬───────┬──────┘
+                                                      │       │
+                                     ┌────────────────┘       └────────────────┐
+                                     │ Metrics (Pull)                          │ Logs (Push)
+                                     ▼                                         ▼
+                              ┌──────────────┐                          ┌──────────────┐
+                              │  Prometheus   │                          │    Loki       │
+                              │  :9090        │                          │    :3100      │
+                              │  (时序数据库)  │                          │  (日志聚合)    │
+                              └──────────────┘                          └──────────────┘
+```
+
+### 2.2 数据流说明
+
+| 阶段       | 说明                                                                                              |
+| ---------- | ------------------------------------------------------------------------------------------------- |
+| **采集**   | Claude Code 内置 OTel SDK，通过 OTLP 协议将 Metrics 和 Events 推送至 OpenTelemetry Collector      |
+| **加工**   | Collector 执行 resource processor，为数据附加 `environment` 等标签                                 |
+| **存储**   | Metrics 通过 Prometheus Exporter 暴露端点，由 Prometheus 每 15s 拉取；Events 通过 OTLP/HTTP 推送至 Loki |
+
+### 2.3 两条数据管道
+
+Claude Code 输出的遥测数据分为两类，分别走不同的存储与查询链路：
+
+| 数据类型                    | 协议/格式      | Collector 导出器          | 存储后端     | 查询语言 |
+| -------------------------- | -------------- | ------------------------- | ----------- | -------- |
+| **Metrics（时序指标）**      | OTLP → Counter | `prometheus` exporter     | Prometheus  | PromQL   |
+| **Events（结构化事件日志）** | OTLP → LogRecord | `otlphttp` exporter     | Loki        | LogQL    |
+
+---
+
+## 3. Claude Code 遥测数据模型
+
+> 参考官方文档：https://code.claude.com/docs/en/monitoring-usage
+
+### 3.1 Metrics（时序指标）
+
+Claude Code 通过 OTel Metrics SDK 输出以下 Counter 类型指标：
+
+| 指标名称                              | 说明                         | 单位   | 关键维度属性                                |
+| ------------------------------------- | ---------------------------- | ------ | ------------------------------------------ |
+| `claude_code.session.count`           | CLI 会话启动次数              | count  | `session.id`, `user.account_uuid`           |
+| `claude_code.cost.usage`              | 会话产生的费用                | USD    | `model`                                     |
+| `claude_code.token.usage`             | Token 消耗量                  | tokens | `type`(input/output/cacheRead/cacheCreation), `model` |
+| `claude_code.lines_of_code.count`     | 代码修改行数                  | count  | `type`(added/removed)                       |
+| `claude_code.commit.count`            | Git commit 次数               | count  | -                                           |
+| `claude_code.pull_request.count`      | PR 创建次数                   | count  | -                                           |
+| `claude_code.code_edit_tool.decision` | 代码编辑工具权限决策次数       | count  | `tool`, `decision`(accept/reject)           |
+
+**公共属性（所有 Metrics 共有）：**
+
+| 属性                  | 说明              | 基数控制环境变量                       | 默认 |
+| --------------------- | ----------------- | ------------------------------------- | ---- |
+| `session.id`          | 会话唯一 ID        | `OTEL_METRICS_INCLUDE_SESSION_ID`     | true |
+| `app.version`         | Claude Code 版本   | `OTEL_METRICS_INCLUDE_VERSION`        | false |
+| `organization.id`     | 组织 UUID          | -                                     | -    |
+| `user.account_uuid`   | 用户 UUID          | `OTEL_METRICS_INCLUDE_ACCOUNT_UUID`   | true |
+
+> **注意**：Prometheus 存储时，指标名称中的 `.` 会被转换为 `_`，如 `claude_code.cost.usage` → `claude_code_cost_usage_USD_total`。
+
+### 3.2 Events（结构化事件日志）
+
+Claude Code 通过 OTel Logs/Events SDK 输出以下事件，每条事件是一个 LogRecord：
+
+#### 3.2.1 `claude_code.user_prompt` — 用户提交 Prompt
+
+| 字段             | 说明                                                  |
+| ---------------- | ----------------------------------------------------- |
+| `prompt_length`  | Prompt 字符长度                                        |
+| `prompt`         | Prompt 原文（默认脱敏，需设置 `OTEL_LOG_USER_PROMPTS=1` 开启） |
+
+#### 3.2.2 `claude_code.tool_result` — 工具执行结果
+
+| 字段           | 说明                            |
+| -------------- | ------------------------------- |
+| `name`         | 工具名称（如 Read, Write, Bash） |
+| `success`      | 是否成功（true/false）           |
+| `duration_ms`  | 执行耗时（毫秒）                 |
+| `error`        | 错误信息（失败时）               |
+
+#### 3.2.3 `claude_code.api_request` — API 请求详情
+
+| 字段                   | 说明                |
+| ---------------------- | ------------------- |
+| `model`                | 使用的模型            |
+| `cost_usd`             | 预估费用（USD）       |
+| `duration_ms`          | 请求耗时（毫秒）      |
+| `input_tokens`         | 输入 Token 数         |
+| `output_tokens`        | 输出 Token 数         |
+| `cache_read_tokens`    | 缓存读取 Token 数     |
+| `cache_creation_tokens`| 缓存创建 Token 数     |
+
+#### 3.2.4 `claude_code.api_error` — API 请求错误
+
+| 字段          | 说明                  |
+| ------------- | --------------------- |
+| `model`       | 使用的模型              |
+| `error`       | 错误信息               |
+| `status_code` | HTTP 状态码            |
+| `duration_ms` | 请求耗时（毫秒）        |
+| `attempt`     | 重试次数               |
+
+#### 3.2.5 `claude_code.tool_decision` — 工具权限决策
+
+| 字段         | 说明                                                                 |
+| ------------ | -------------------------------------------------------------------- |
+| `tool_name`  | 工具名称                                                              |
+| `decision`   | accept / reject                                                      |
+| `source`     | 决策来源（config / user_permanent / user_temporary / user_abort / user_reject） |
+
+---
+
+## 4. 基础设施组件设计
+
+### 4.1 组件清单
+
+| 组件                         | 镜像                                          | 端口映射              | 角色              |
+| ---------------------------- | --------------------------------------------- | --------------------- | ----------------- |
+| OpenTelemetry Collector      | `otel/opentelemetry-collector-contrib:latest` | 4317(gRPC), 4318(HTTP), 8889(metrics) | 遥测网关/路由      |
+| Prometheus                   | `prom/prometheus:latest`                      | 9090                   | 指标存储与查询     |
+| Loki                         | `grafana/loki:latest`                         | 3100                   | 日志聚合与存储     |
+
+所有组件通过 Docker Compose 编排，运行在同一 `otel-network` 桥接网络中，容器间通过服务名通信。
+
+### 4.2 OpenTelemetry Collector 配置
+
+Collector 是整个方案的核心中转枢纽，配置分为四个部分：
+
+```yaml
+# 接收器 —— 数据入口
+receivers:
+  otlp:
+    protocols:
+      grpc:
+        endpoint: 0.0.0.0:4317
+      http:
+        endpoint: 0.0.0.0:4318
+
+# 处理器 —— 数据加工
+processors:
+  resource:
+    attributes:
+      - key: environment
+        value: "production"
+        action: upsert              # 为所有数据附加 environment 标签
+
+# 导出器 —— 数据出口
+exporters:
+  prometheus:
+    endpoint: "0.0.0.0:8889"        # Prometheus 来此端口拉取指标
+  otlphttp:
+    endpoint: http://loki:3100/otlp # 事件日志推送至 Loki
+  debug:
+    verbosity: normal               # 控制台输出，用于调试
+
+# 管道 —— 将上述组件串联
+service:
+  pipelines:
+    metrics:                        # 指标管道
+      receivers: [otlp]
+      processors: [resource]
+      exporters: [prometheus, debug]
+    logs:                           # 日志管道
+      receivers: [otlp]
+      processors: [resource]
+      exporters: [debug, otlphttp]
+```
+
+**设计要点：**
+
+- Metrics 走 **Pull 模式**：Collector 暴露 `:8889` Prometheus 端点，Prometheus 每 15s 来抓取
+- Events/Logs 走 **Push 模式**：Collector 主动通过 OTLP/HTTP 推送到 Loki `/otlp` 端点
+- `debug` exporter 仅用于开发调试阶段，生产环境可移除
+
+### 4.3 Prometheus 配置
+
+```yaml
+global:
+  scrape_interval: 15s              # 指标抓取间隔
+
+scrape_configs:
+  - job_name: 'otel-collector'
+    static_configs:
+      - targets: ['otel-collector:8889']   # 从 Collector 拉取指标
+```
+
+---
+
+## 5. 客户端接入配置
+
+### 5.1 必需环境变量
+
+开发者需在本机设置以下环境变量，Claude Code 启动后即自动上报遥测数据：
+
+```bash
+# 必选：开启遥测
+export CLAUDE_CODE_ENABLE_TELEMETRY=1
+
+# 必选：配置导出器
+export OTEL_METRICS_EXPORTER=otlp
+export OTEL_LOGS_EXPORTER=otlp
+export OTEL_EXPORTER_OTLP_PROTOCOL=grpc
+export OTEL_EXPORTER_OTLP_ENDPOINT=http://<collector-host>:4317
+```
+
+### 5.2 可选调优参数
+
+```bash
+# 导出间隔（调试时可缩短，生产建议保持默认）
+export OTEL_METRIC_EXPORT_INTERVAL=60000   # 指标导出间隔，默认 60s
+export OTEL_LOGS_EXPORT_INTERVAL=5000      # 日志导出间隔，默认 5s
+
+# 隐私控制
+export OTEL_LOG_USER_PROMPTS=1              # 开启 Prompt 内容记录（默认关闭）
+
+# 基数控制（影响 Prometheus 存储开销）
+export OTEL_METRICS_INCLUDE_SESSION_ID=true
+export OTEL_METRICS_INCLUDE_VERSION=false
+export OTEL_METRICS_INCLUDE_ACCOUNT_UUID=true
+```
+
+### 5.3 集中管理配置（管理员）
+
+可通过 managed-settings.json 文件为团队所有成员统一配置，用户无法覆盖：
+
+- **macOS**: `/Library/Application Support/ClaudeCode/managed-settings.json`
+- **Linux**: `/etc/claude-code/managed-settings.json`
+
+```json
+{
+  "env": {
+    "CLAUDE_CODE_ENABLE_TELEMETRY": "1",
+    "OTEL_METRICS_EXPORTER": "otlp",
+    "OTEL_LOGS_EXPORTER": "otlp",
+    "OTEL_EXPORTER_OTLP_PROTOCOL": "grpc",
+    "OTEL_EXPORTER_OTLP_ENDPOINT": "http://collector.company.com:4317"
+  }
+}
+```
+
+---
+
+## 6. 部署方案
+
+### 6.1 目录结构
+
+```
+claude-code-otel/
+├── docker-compose.yml              # 主编排文件（3 个服务：Collector + Prometheus + Loki）
+├── collector-config.yaml           # OTel Collector 配置
+├── prometheus.yml                  # Prometheus 抓取配置
+└── Makefile                        # 运维命令集
+```
+
+### 6.2 一键启动
+
+```bash
+# 启动所有服务
+make up
+# 等价于: docker compose up -d
+
+# 查看状态
+make status
+
+# 查看日志
+make logs
+
+# 停止服务
+make down
+
+# 清理（含数据卷）
+make clean
+```
+
+### 6.3 服务访问地址
+
+| 服务       | URL                     | 认证              |
+| ---------- | ----------------------- | ----------------- |
+| Prometheus | http://localhost:9090   | 无                |
+| Loki       | http://localhost:3100   | 无                |
+| Collector  | http://localhost:4317   | 无（gRPC 入口）   |
+| Collector  | http://localhost:4318   | 无（HTTP 入口）   |
+
+### 6.4 替代存储方案
+
+| 方案                       | 说明                                                                    | 适用场景               |
+| -------------------------- | ----------------------------------------------------------------------- | ---------------------- |
+| **VictoriaMetrics 方案**   | 用 VictoriaMetrics 替代 Prometheus，通过 Remote Write 接收指标             | 大规模 / 长期存储场景    |
+
+---
+
+## 7. 数据采集能力矩阵
+
+下表汇总本方案采集与存储的监控维度：
+
+| 监控维度     | 关键问题                                     | 对应指标/事件                              | 存储后端      |
+| ------------ | -------------------------------------------- | ----------------------------------------- | ------------ |
+| **成本**     | 各模型花了多少钱？总费用趋势如何？               | `claude_code.cost.usage`                  | Prometheus   |
+| **用量**     | Token 消耗量多少？各类型 Token 占比？            | `claude_code.token.usage`                 | Prometheus   |
+| **请求**     | API 的请求频次？各模型的调用分布？               | `claude_code.api_request` 事件             | Loki         |
+| **会话**     | 有多少活跃会话？                               | `claude_code.session.count`               | Prometheus   |
+| **工具**     | 哪些工具调用最多？成功率如何？耗时是否合理？       | `claude_code.tool_result` 事件            | Loki         |
+| **性能**     | API 响应耗时如何？是否有延迟飙升？               | `claude_code.api_request` 事件            | Loki         |
+| **错误**     | API 报错率是多少？主要错误码？                   | `claude_code.api_error` 事件              | Loki         |
+| **生产力**   | 代码产出（增删行数）有多少？Commit/PR 频次？      | `lines_of_code.count`, `commit.count`, `pull_request.count` | Prometheus |
+
+---
+
+## 8. 安全与隐私
+
+| 关注点                | 策略                                                                                             |
+| --------------------- | ------------------------------------------------------------------------------------------------ |
+| **数据存储位置**       | 所有数据留在自有基础设施内，不外传                                                                  |
+| **Prompt 内容**        | 默认脱敏不记录，仅保存 `prompt_length`；如需记录需显式设置 `OTEL_LOG_USER_PROMPTS=1`               |
+| **API Key / 文件内容** | Claude Code 遥测中永不包含 API 密钥或文件内容                                                      |
+| **网络隔离**          | 所有容器运行在独立 Docker bridge 网络中，仅对外暴露必需端口                                        |
+
+---
+
+## 9. 后续演进方向
+
+以下为第一版方案上线后可考虑的优化方向：
+
+| 序号 | 方向             | 说明                                                                                     |
+| ---- | ---------------- | ---------------------------------------------------------------------------------------- |
+| 1    | **可视化看板**   | 接入 Grafana，基于已落盘数据构建 Dashboard，实现实时可视化展示                              |
+| 2    | **告警规则**     | 在 Prometheus 中配置成本超限、错误率飙升等告警，对接企业 IM（如飞书、钉钉、Slack）            |
+| 3    | **多用户分析**   | 引入 `user.account_uuid` 维度，支持按团队/个人下钻分析                                    |
+| 4    | **持久化存储**   | 为 Prometheus 和 Loki 挂载持久卷（Named Volume 或云存储），防止容器销毁后数据丢失             |
+| 5    | **高可用**       | 考虑 Prometheus 联邦或 VictoriaMetrics 集群模式，Loki 微服务模式                           |
+| 6    | **DAU/WAU/MAU**  | 引入支持 HyperLogLog 的后端（如 ClickHouse），实现精确的活跃用户统计                        |
+| 7    | **认证加固**     | Collector 端点增加 mTLS 或 Bearer Token 认证，避免未授权上报                               |
+
+---
+
+## 附录 A：Prometheus 中的指标命名映射
+
+Claude Code OTel SDK 原始指标名经过 Prometheus Exporter 转换后：
+
+| OTel 原始名称                          | Prometheus 名称                                       |
+| ------------------------------------- | ----------------------------------------------------- |
+| `claude_code.session.count`           | `claude_code_session_count_total`                     |
+| `claude_code.cost.usage`             | `claude_code_cost_usage_USD_total`                    |
+| `claude_code.token.usage`            | `claude_code_token_usage_tokens_total`                |
+| `claude_code.lines_of_code.count`    | `claude_code_lines_of_code_count_total`               |
+| `claude_code.commit.count`           | `claude_code_commit_count_total`                      |
+| `claude_code.pull_request.count`     | `claude_code_pull_request_count_total`                |
+| `claude_code.code_edit_tool.decision`| `claude_code_code_edit_tool_decision_total`            |
+
+**转换规则**：`.` → `_`，并根据单位和类型自动追加后缀（如 `_USD_total`、`_tokens_total`）。
+
+## 附录 B：关键查询语句参考
+
+### PromQL（Prometheus 指标查询）
+
+```promql
+# 各模型累计费用
+sum by (model) (claude_code_cost_usage_USD_total{job="otel-collector"})
+
+# Token 消耗速率（按类型，5 分钟窗口）
+sum by (type) (rate(claude_code_token_usage_tokens_total{job="otel-collector"}[5m]) * 60)
+
+# 代码增删速率
+sum by (type) (rate(claude_code_lines_of_code_count_total{job="otel-collector"}[5m]) * 60)
+```
+
+### LogQL（Loki 事件查询）
+
+```logql
+# 各工具调用频次（5 分钟窗口）
+sum by (tool_name) (
+  count_over_time({service_name="claude-code"} |= "claude_code.tool_result" [5m])
+)
+
+# 工具成功率（15 分钟窗口）
+100 * (
+  sum by (tool_name) (count_over_time(
+    {service_name="claude-code"} |= "claude_code.tool_result" | json | success="true" [15m]
+  ))
+) / (
+  sum by (tool_name) (count_over_time(
+    {service_name="claude-code"} |= "claude_code.tool_result" [15m]
+  ))
+)
+
+# API 平均响应耗时（按模型）
+avg by (model) (
+  avg_over_time(
+    {service_name="claude-code"} |= "claude_code.api_request" | unwrap duration_ms [$__interval]
+  )
+)
+
+# API 错误率（按状态码）
+sum by (status_code) (
+  rate({service_name="claude-code"} |= "claude_code.api_error" | json | __error__ = "" [$__interval])
+)
+```
+
+## 附录 C：Docker Compose 服务依赖关系
+
+```
+otel-collector  (无依赖，最先启动)
+      │
+      ├──▶ prometheus   (depends_on: otel-collector)
+      │
+      └──▶ loki
+```

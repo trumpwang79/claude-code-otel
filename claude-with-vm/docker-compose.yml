@@ -1,0 +1,63 @@
+networks:
+  otel-network:
+    driver: bridge
+
+services:
+  otel-collector:
+    image: otel/opentelemetry-collector-contrib:latest
+    container_name: otel-collector
+    command: ["--config=/etc/otel/collector-config.yaml"]
+    volumes:
+      - ./collector-config.yaml:/etc/otel/collector-config.yaml:ro
+    ports:
+      - "4317:4317"      # OTLP gRPC（Claude Code 推送入口）
+      - "4318:4318"      # OTLP HTTP（备用）
+    restart: unless-stopped
+    networks:
+      - otel-network
+
+  victoriametrics:
+    image: victoriametrics/victoria-metrics:latest
+    container_name: victoriametrics
+    volumes:
+      - vmdata:/storage
+    command:
+      - "--storageDataPath=/storage"
+      - "--retentionPeriod=90d"
+      - "--httpListenAddr=:8428"
+    ports:
+      - "8428:8428"
+    restart: unless-stopped
+    networks:
+      - otel-network
+
+  loki:
+    image: grafana/loki:latest
+    container_name: loki
+    ports:
+      - "3100:3100"
+    command: -config.file=/etc/loki/local-config.yaml
+    restart: unless-stopped
+    networks:
+      - otel-network
+
+  grafana:
+    image: grafana/grafana-oss:latest
+    container_name: grafana
+    environment:
+      - GF_SECURITY_ADMIN_PASSWORD=admin
+      - GF_USERS_ALLOW_SIGN_UP=false
+      - GF_FEATURE_TOGGLES_ENABLE=logsSampleInExplore
+    volumes:
+      - ./grafana-datasources.yml:/etc/grafana/provisioning/datasources/datasources.yml:ro
+      - ./grafana-dashboards.yml:/etc/grafana/provisioning/dashboards/dashboards.yml:ro
+      - ./claude-code-dashboard.json:/var/lib/grafana/dashboards/claude-code-dashboard.json:ro
+    ports:
+      - "3000:3000"
+    restart: unless-stopped
+    depends_on: [victoriametrics, loki]
+    networks:
+      - otel-network
+
+volumes:
+  vmdata:
