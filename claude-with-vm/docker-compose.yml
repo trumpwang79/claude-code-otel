@@ -16,21 +16,6 @@ services:
     networks:
       - otel-network
 
-  victoriametrics:
-    image: victoriametrics/victoria-metrics:latest
-    container_name: victoriametrics
-    volumes:
-      - vmdata:/storage
-    command:
-      - "--storageDataPath=/storage"
-      - "--retentionPeriod=90d"
-      - "--httpListenAddr=:8428"
-    ports:
-      - "8428:8428"
-    restart: unless-stopped
-    networks:
-      - otel-network
-
   loki:
     image: grafana/loki:latest
     container_name: loki
@@ -55,9 +40,7 @@ services:
     ports:
       - "3000:3000"
     restart: unless-stopped
-    depends_on: [victoriametrics, loki]
+    depends_on: [loki]
     networks:
       - otel-network
 
-volumes:
-  vmdata:
