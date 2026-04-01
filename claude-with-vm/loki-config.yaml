@@ -1,0 +1,51 @@
+# ── 认证（单节点关闭多租户） ───────────────────────────
+auth_enabled: false
+
+# ── HTTP 服务端口 ─────────────────────────────────────
+server:
+  http_listen_port: 3100
+  log_level: info
+
+# ── 通用存储配置 ───────────────────────────────────────
+common:
+  instance_addr: 127.0.0.1
+  path_prefix: /loki
+  storage:
+    filesystem:
+      chunks_directory: /loki/chunks
+      rules_directory: /loki/rules
+  replication_factor: 1
+  ring:
+    kvstore:
+      store: inmemory
+
+# ── 存储 Schema（定义索引和块的格式版本） ──────────────
+schema_config:
+  configs:
+    - from: 2020-10-24
+      store: tsdb
+      object_store: filesystem
+      schema: v13
+      index:
+        prefix: index_
+        period: 24h
+
+ruler:
+  alertmanager_url: http://localhost:9093
+
+# ── 日志保留策略（核心！） ─────────────────────────────
+# retention_period: 日志保留天数，超期自动清理
+# compaction: 定期压缩并删除过期数据
+limits_config:
+  retention_period: 15d          # 日志保留 15 天，可按需调整（如 7d、90d）
+
+compactor:
+  working_directory: /loki/compactor
+  compaction_interval: 10m       # 每 10 分钟执行一次压缩
+  retention_enabled: true        # 启用基于保留期的自动删除
+  retention_delete_delay: 2h     # 标记删除后延迟 2 小时真正清理
+  delete_request_store: filesystem
+
+# 可选：如需禁用匿名统计，取消下面注释
+# analytics:
+#   reporting_enabled: false

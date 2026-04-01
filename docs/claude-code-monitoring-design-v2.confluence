@@ -1,0 +1,550 @@
+{info:title=文档信息}
+||信息项||内容||
+|文档版本|v2.0|
+|创建日期|2026-04-01|
+|作者| |
+|状态|预研 / Draft|
+|参考来源|[Claude Code 官方可观测性文档|https://code.claude.com/docs/en/monitoring-usage] [开源项目 ColeMurray/claude-code-otel|https://github.com/ColeMurray/claude-code-otel]|
+{info}
+
+{toc:printable=true|style=disc|maxLevel=3|minLevel=1|type=list}
+
+----
+
+h1. Claude Code 指标监控方案设计文档（v2）
+
+h2. 1. 背景与目标
+
+h3. 1.1 背景
+
+Claude Code 是 Anthropic 提供的 AI 编程助手，在日常开发中被广泛使用。随着团队使用规模的扩大，我们面临以下管理需求：
+
+* *成本管控*：每个模型的 API 调用费用不同，需掌握团队整体开销与趋势
+* *使用度量*：了解 Claude Code 被哪些人、以何种频率、在什么场景下使用
+* *效能评估*：量化 AI 辅助编程对研发效率的提升效果
+* *性能监控*：及时发现 API 延迟飙高、报错率上升等异常
+
+h3. 1.2 目标
+
+基于 Claude Code 原生支持的 OpenTelemetry（OTel）遥测能力，搭建一套端到端的可观测性监控平台，实现以下核心目标：
+
+# *实时采集*：自动采集 Claude Code 产生的 Metrics（指标）和 Events（事件日志）
+# *可靠存储*：将指标写入 VictoriaMetrics 时序数据库，事件写入 Loki 日志聚合系统
+# *成本分析*：按模型、用户、时段维度的数据落盘，支撑后续成本分析
+# *工具洞察*：工具调用频次、成功率与耗时数据的采集与存储
+
+----
+
+h2. 2. 整体架构
+
+h3. 2.1 架构总览
+
+{code:title=架构图|language=none}
+┌──────────────┐       OTLP (gRPC)             ┌──────────────────────┐
+│              │ ──────────────────────────────▶│                      │
+│  Claude Code │   Metrics + Events (Logs)     │  OpenTelemetry       │
+│  (各开发者)   │                               │  Collector           │
+│              │                               │  :4317(gRPC)         │
+└──────────────┘                               └──────┬───────┬──────┘
+                                                      │       │
+                                     ┌────────────────┘       └────────────────┐
+                                     │ Metrics (Push)                          │ Logs (Push)
+                                     │ Remote Write                            │ OTLP/HTTP
+                                     ▼                                         ▼
+                              ┌──────────────┐                          ┌──────────────┐
+                              │ Victoria     │                          │    Loki       │
+                              │ Metrics      │                          │    :3100      │
+                              │ (已有中间件)  │                          │  (日志聚合)    │
+                              │              │                          │  15天保留      │
+                              │ vminsert     │                          │  持久化存储    │
+                              │  :8480       │                          └──────────────┘
+                              │ vmselect     │
+                              │  :8481       │
+                              └──────────────┘
+{code}
+
+h3. 2.2 数据流说明
+
+||阶段||说明||
+|*采集*|Claude Code 内置 OTel SDK，通过 OTLP gRPC 协议将 Metrics 和 Events 推送至 OpenTelemetry Collector|
+|*路由*|Collector 将 Metrics 和 Events 分流至各自的存储后端|
+|*存储*|Metrics 通过 Prometheus Remote Write 推送至 VictoriaMetrics（vminsert）；Events 通过 OTLP/HTTP 推送至 Loki|
+
+{info}
+* *VictoriaMetrics 为已有中间件*：不包含在本项目的 Docker Compose 编排中，由基础设施团队统一管理
+* *Loki 持久化与保留策略*：Loki 使用自定义配置文件，数据持久化至宿主机目录，并配置 15 天自动过期清理
+{info}
+
+h3. 2.3 两条数据管道
+
+Claude Code 输出的遥测数据分为两类，分别走不同的存储与查询链路：
+
+||数据类型||协议/格式||Collector 导出器||存储后端||查询语言||
+|*Metrics（时序指标）*|OTLP → Counter|{{prometheusremotewrite}} exporter|VictoriaMetrics|MetricsQL（兼容 PromQL）|
+|*Events（结构化事件日志）*|OTLP → LogRecord|{{otlphttp}} exporter|Loki|LogQL|
+
+----
+
+h2. 3. Claude Code 遥测数据模型
+
+{note}参考官方文档：[https://code.claude.com/docs/en/monitoring-usage]{note}
+
+h3. 3.1 Metrics（时序指标）
+
+Claude Code 通过 OTel Metrics SDK 输出以下 Counter 类型指标：
+
+||指标名称||说明||单位||关键维度属性||
+|{{claude_code.session.count}}|CLI 会话启动次数|count|{{session.id}}, {{user.account_uuid}}|
+|{{claude_code.cost.usage}}|会话产生的费用|USD|{{model}}|
+|{{claude_code.token.usage}}|Token 消耗量|tokens|{{type}}(input/output/cacheRead/cacheCreation), {{model}}|
+|{{claude_code.lines_of_code.count}}|代码修改行数|count|{{type}}(added/removed)|
+|{{claude_code.commit.count}}|Git commit 次数|count|\-|
+|{{claude_code.pull_request.count}}|PR 创建次数|count|\-|
+|{{claude_code.code_edit_tool.decision}}|代码编辑工具权限决策次数|count|{{tool}}, {{decision}}(accept/reject)|
+
+*公共属性（所有 Metrics 共有）：*
+
+||属性||说明||基数控制环境变量||默认||
+|{{session.id}}|会话唯一 ID|{{OTEL_METRICS_INCLUDE_SESSION_ID}}|true|
+|{{app.version}}|Claude Code 版本|{{OTEL_METRICS_INCLUDE_VERSION}}|false|
+|{{organization.id}}|组织 UUID|\-|\-|
+|{{user.account_uuid}}|用户 UUID|{{OTEL_METRICS_INCLUDE_ACCOUNT_UUID}}|true|
+
+{warning}VictoriaMetrics 存储时，指标名称中的 {{.}} 会被转换为 {{_}}，如 {{claude_code.cost.usage}} → {{claude_code_cost_usage_USD_total}}。该转换规则与 Prometheus 一致，查询语法完全兼容。{warning}
+
+h3. 3.2 Events（结构化事件日志）
+
+Claude Code 通过 OTel Logs/Events SDK 输出以下事件，每条事件是一个 LogRecord：
+
+h4. 3.2.1 {{claude_code.user_prompt}} — 用户提交 Prompt
+
+||字段||说明||
+|{{prompt_length}}|Prompt 字符长度|
+|{{prompt}}|Prompt 原文（默认脱敏，需设置 {{OTEL_LOG_USER_PROMPTS=1}} 开启）|
+
+h4. 3.2.2 {{claude_code.tool_result}} — 工具执行结果
+
+||字段||说明||
+|{{name}}|工具名称（如 Read, Write, Bash）|
+|{{success}}|是否成功（true/false）|
+|{{duration_ms}}|执行耗时（毫秒）|
+|{{error}}|错误信息（失败时）|
+
+h4. 3.2.3 {{claude_code.api_request}} — API 请求详情
+
+||字段||说明||
+|{{model}}|使用的模型|
+|{{cost_usd}}|预估费用（USD）|
+|{{duration_ms}}|请求耗时（毫秒）|
+|{{input_tokens}}|输入 Token 数|
+|{{output_tokens}}|输出 Token 数|
+|{{cache_read_tokens}}|缓存读取 Token 数|
+|{{cache_creation_tokens}}|缓存创建 Token 数|
+
+h4. 3.2.4 {{claude_code.api_error}} — API 请求错误
+
+||字段||说明||
+|{{model}}|使用的模型|
+|{{error}}|错误信息|
+|{{status_code}}|HTTP 状态码|
+|{{duration_ms}}|请求耗时（毫秒）|
+|{{attempt}}|重试次数|
+
+h4. 3.2.5 {{claude_code.tool_decision}} — 工具权限决策
+
+||字段||说明||
+|{{tool_name}}|工具名称|
+|{{decision}}|accept / reject|
+|{{source}}|决策来源（config / user_permanent / user_temporary / user_abort / user_reject）|
+
+----
+
+h2. 4. 基础设施组件设计
+
+h3. 4.1 组件清单
+
+||组件||镜像||端口映射||角色||部署方式||
+|OpenTelemetry Collector|{{otel/opentelemetry-collector-contrib:latest}}|4317(gRPC)|遥测网关/路由|Docker Compose 部署|
+|Loki|{{grafana/loki:latest}}|3100|日志聚合与存储（15天保留）|Docker Compose 部署|
+|VictoriaMetrics（集群版）|已有基础设施|vminsert:8480, vmselect:8481|指标存储与查询|*已有中间件*，无需本项目部署|
+
+Collector 和 Loki 通过 Docker Compose 编排，运行在同一 {{otel-network}} 桥接网络中，容器间通过服务名通信。VictoriaMetrics 为已有基础设施，Collector 通过宿主机网络访问其 vminsert 端点。
+
+h3. 4.2 OpenTelemetry Collector 配置
+
+Collector 是整个方案的核心中转枢纽，配置分为三个部分（接收器、导出器、管道）：
+
+{code:language=yaml|title=collector-config.yaml}
+# ── 接收器 ── 数据入口
+receivers:
+  otlp:
+    protocols:
+      grpc:
+        endpoint: 0.0.0.0:4317
+
+# ── 导出器 ── 数据出口
+exporters:
+  # 指标通过 Prometheus Remote Write 推送到 VictoriaMetrics vminsert
+  # 客户端需设置 OTEL_EXPORTER_OTLP_METRICS_TEMPORALITY_PREFERENCE=cumulative
+  prometheusremotewrite:
+    endpoint: http://<vm-insert-host>:8480/insert/0/prometheus/
+
+  # 日志推送给 Loki
+  otlphttp:
+    endpoint: http://loki:3100/otlp
+
+# ── 管道 ── 将上述组件串联
+service:
+  pipelines:
+    metrics:                        # 指标管道
+      receivers: [otlp]
+      exporters: [prometheusremotewrite]
+
+    logs:                           # 日志管道
+      receivers: [otlp]
+      exporters: [otlphttp]
+{code}
+
+*设计要点：*
+
+* 仅开放 *gRPC 4317* 端口接收数据
+* Metrics 走 *Push 模式*：Collector 通过 {{prometheusremotewrite}} 导出器，将指标主动推送至 VictoriaMetrics 的 Prometheus Remote Write 端点（{{/insert/0/prometheus/}}）
+* Events/Logs 走 *Push 模式*：Collector 通过 {{otlphttp}} 导出器，将事件推送至 Loki 的 {{/otlp}} 端点
+* 配置精简，无额外 processor 和 debug exporter，更贴合生产环境使用
+
+{info:title=关于 Temporality 配置}
+VictoriaMetrics 要求接收 *Cumulative*（累积）语义的指标数据。Claude Code 客户端必须设置环境变量 {{OTEL_EXPORTER_OTLP_METRICS_TEMPORALITY_PREFERENCE=cumulative}}，以确保 OTel SDK 输出累积计数器而非 Delta 差值，否则 VictoriaMetrics 可能无法正确聚合数据。
+{info}
+
+h3. 4.3 VictoriaMetrics 说明
+
+VictoriaMetrics 为团队已有的时序数据库中间件（集群版），本项目不负责其部署和运维。本方案涉及的关键端点：
+
+||组件||端口||用途||
+|*vminsert*|8480|Prometheus Remote Write 写入端点：{{/insert/0/prometheus/}}|
+|*vmselect*|8481|PromQL 兼容查询端点：{{/select/0/prometheus/}}|
+
+Collector 写入路径：{{http\://<vm-insert-host>:8480/insert/0/prometheus/}}
+查询路径（可用于 Grafana 等可视化工具）：{{http\://<vm-select-host>:8481/select/0/prometheus}}
+
+{note}URL 中的 {{0}} 为 VictoriaMetrics 租户 ID（accountID），如有多租户需求可按团队分配不同的 ID。{note}
+
+h3. 4.4 Loki 配置
+
+Loki 使用自定义配置文件 {{loki-config.yaml}}，数据持久化至宿主机目录，并启用基于保留期的自动清理。
+
+{code:language=yaml|title=loki-config.yaml（关键配置）}
+# 认证（单节点关闭多租户）
+auth_enabled: false
+
+server:
+  http_listen_port: 3100
+  log_level: info
+
+# 存储路径
+common:
+  instance_addr: 127.0.0.1
+  path_prefix: /loki
+  storage:
+    filesystem:
+      chunks_directory: /loki/chunks
+      rules_directory: /loki/rules
+  replication_factor: 1
+  ring:
+    kvstore:
+      store: inmemory
+
+# 存储 Schema
+schema_config:
+  configs:
+    - from: 2020-10-24
+      store: tsdb
+      object_store: filesystem
+      schema: v13
+      index:
+        prefix: index_
+        period: 24h
+
+ruler:
+  alertmanager_url: http://localhost:9093
+
+# 日志保留策略
+limits_config:
+  retention_period: 15d              # 日志保留 15 天，可按需调整
+
+# 压缩与过期清理
+compactor:
+  working_directory: /loki/compactor
+  compaction_interval: 10m           # 每 10 分钟执行一次压缩
+  retention_enabled: true            # 启用基于保留期的自动删除
+  retention_delete_delay: 2h         # 标记删除后延迟 2h 真正清理
+  delete_request_store: filesystem
+{code}
+
+*设计要点：*
+
+* 数据持久化至宿主机 {{/var/data/loki}} 目录（通过 Docker volume 挂载），容器重建后数据不丢失
+* 日志保留 *15 天*（{{retention_period: 15d}}），超期数据由 compactor 自动清理
+* 使用 TSDB + filesystem 存储引擎，适合单节点部署场景
+* 容器以 {{user: "0"}}（root）运行，确保对宿主机挂载目录有写入权限
+
+----
+
+h2. 5. 客户端接入配置
+
+h3. 5.1 必需环境变量
+
+开发者需在本机设置以下环境变量，Claude Code 启动后即自动上报遥测数据：
+
+{code:language=bash|title=必需环境变量}
+# 必选：开启遥测
+export CLAUDE_CODE_ENABLE_TELEMETRY=1
+
+# 必选：配置导出器
+export OTEL_METRICS_EXPORTER=otlp
+export OTEL_LOGS_EXPORTER=otlp
+export OTEL_EXPORTER_OTLP_PROTOCOL=grpc
+export OTEL_EXPORTER_OTLP_ENDPOINT=http://<collector-host>:4317
+
+# 必选：指标时间语义（VictoriaMetrics 要求 cumulative）
+export OTEL_EXPORTER_OTLP_METRICS_TEMPORALITY_PREFERENCE=cumulative
+{code}
+
+{warning:title=重要说明}
+{{OTEL_EXPORTER_OTLP_METRICS_TEMPORALITY_PREFERENCE=cumulative}} 为必需环境变量。该变量指示 OTel SDK 以 Cumulative（累积）语义上报指标数据，VictoriaMetrics 依赖此语义进行正确的数据聚合。如果未设置，SDK 可能默认使用 Delta 语义，导致存储端数据异常。
+{warning}
+
+h3. 5.2 可选调优参数
+
+{code:language=bash|title=可选参数}
+# 导出间隔（调试时可缩短，生产建议保持默认）
+export OTEL_METRIC_EXPORT_INTERVAL=60000   # 指标导出间隔，默认 60s
+export OTEL_LOGS_EXPORT_INTERVAL=5000      # 日志导出间隔，默认 5s
+
+# 隐私控制
+export OTEL_LOG_USER_PROMPTS=1              # 开启 Prompt 内容记录（默认关闭）
+
+# 基数控制（影响 VictoriaMetrics 存储开销）
+export OTEL_METRICS_INCLUDE_SESSION_ID=true
+export OTEL_METRICS_INCLUDE_VERSION=false
+export OTEL_METRICS_INCLUDE_ACCOUNT_UUID=true
+{code}
+
+h3. 5.3 集中管理配置（管理员）
+
+可通过 managed-settings.json 文件为团队所有成员统一配置，用户无法覆盖：
+
+* *macOS*: {{/Library/Application Support/ClaudeCode/managed-settings.json}}
+* *Linux*: {{/etc/claude-code/managed-settings.json}}
+
+{code:language=json|title=managed-settings.json}
+{
+  "env": {
+    "CLAUDE_CODE_ENABLE_TELEMETRY": "1",
+    "OTEL_METRICS_EXPORTER": "otlp",
+    "OTEL_LOGS_EXPORTER": "otlp",
+    "OTEL_EXPORTER_OTLP_PROTOCOL": "grpc",
+    "OTEL_EXPORTER_OTLP_ENDPOINT": "http://collector.company.com:4317",
+    "OTEL_EXPORTER_OTLP_METRICS_TEMPORALITY_PREFERENCE": "cumulative"
+  }
+}
+{code}
+
+----
+
+h2. 6. 部署方案
+
+h3. 6.1 目录结构
+
+{code:language=none|title=项目结构}
+claude-code-otel/claude-with-vm/
+├── docker-compose.yml              # 主编排文件（2 个服务：Collector + Loki）
+├── collector-config.yaml           # OTel Collector 配置
+└── loki-config.yaml                # Loki 自定义配置（保留策略、存储等）
+{code}
+
+h3. 6.2 一键启动
+
+{code:language=bash|title=运维命令}
+# 进入目录
+cd claude-with-vm
+
+# 启动所有服务（Collector + Loki）
+docker compose up -d
+
+# 查看状态
+docker compose ps
+
+# 查看日志
+docker compose logs -f
+
+# 停止服务
+docker compose down
+
+# 清理（含数据卷）
+docker compose down -v
+{code}
+
+{info}VictoriaMetrics 无需通过本 Docker Compose 启动，需确保已有 VM 集群可从 Collector 容器网络访问。{info}
+
+h3. 6.3 服务访问地址
+
+||服务||URL||认证||说明||
+|Collector|[http://localhost:4317]|无|gRPC 入口，接收 Claude Code 遥测数据|
+|Loki|[http://localhost:3100]|无|日志聚合后端（数据持久化至 {{/var/data/loki}}，15 天保留）|
+|VictoriaMetrics vminsert|http\://<vm-host>:8480|视部署配置|已有中间件，指标写入端点|
+|VictoriaMetrics vmselect|http\://<vm-host>:8481|视部署配置|已有中间件，指标查询端点|
+
+h3. 6.4 前置条件
+
+||条件||说明||
+|*VictoriaMetrics 可用*|确保 vminsert（:8480）和 vmselect（:8481）端点可从 Collector 容器网络访问|
+|*网络连通性*|Collector 容器需能通过宿主机网络（如 {{172.18.0.1}}）访问 VictoriaMetrics|
+|*Loki 持久化目录*|确保宿主机 {{/var/data/loki}} 目录存在且可写|
+|*Docker 环境*|Docker 和 Docker Compose 已安装|
+
+----
+
+h2. 7. 数据采集能力矩阵
+
+下表汇总本方案采集与存储的监控维度：
+
+||监控维度||关键问题||对应指标/事件||存储后端||
+|*成本*|各模型花了多少钱？总费用趋势如何？|{{claude_code.cost.usage}}|VictoriaMetrics|
+|*用量*|Token 消耗量多少？各类型 Token 占比？|{{claude_code.token.usage}}|VictoriaMetrics|
+|*请求*|API 的请求频次？各模型的调用分布？|{{claude_code.api_request}} 事件|Loki|
+|*会话*|有多少活跃会话？|{{claude_code.session.count}}|VictoriaMetrics|
+|*工具*|哪些工具调用最多？成功率如何？耗时是否合理？|{{claude_code.tool_result}} 事件|Loki|
+|*性能*|API 响应耗时如何？是否有延迟飙升？|{{claude_code.api_request}} 事件|Loki|
+|*错误*|API 报错率是多少？主要错误码？|{{claude_code.api_error}} 事件|Loki|
+|*生产力*|代码产出（增删行数）有多少？Commit/PR 频次？|{{lines_of_code.count}}, {{commit.count}}, {{pull_request.count}}|VictoriaMetrics|
+
+----
+
+h2. 8. 安全与隐私
+
+||关注点||策略||
+|*数据存储位置*|所有数据留在自有基础设施内，不外传|
+|*Prompt 内容*|默认脱敏不记录，仅保存 {{prompt_length}}；如需记录需显式设置 {{OTEL_LOG_USER_PROMPTS=1}}|
+|*API Key / 文件内容*|Claude Code 遥测中永不包含 API 密钥或文件内容|
+|*网络隔离*|Collector、Loki 运行在独立 Docker bridge 网络中，仅对外暴露必需端口；VictoriaMetrics 通过已有网络策略保护|
+
+----
+
+h2. 9. 后续演进方向
+
+以下为 v2 方案上线后可考虑的优化方向：
+
+||序号||方向||说明||
+|1|*可视化看板*|接入 Grafana，基于 VictoriaMetrics 和 Loki 数据源构建统一 Dashboard，实现实时可视化展示|
+|2|*告警规则*|在 VictoriaMetrics 中配置 vmalert 告警规则（成本超限、错误率飙升），对接企业 IM（如飞书、钉钉、Slack）|
+|3|*多用户分析*|引入 {{user.account_uuid}} 维度，支持按团队/个人下钻分析|
+|4|*DAU/WAU/MAU*|引入支持 HyperLogLog 的后端（如 ClickHouse），实现精确的活跃用户统计|
+|5|*认证加固*|Collector 端点增加 mTLS 或 Bearer Token 认证，避免未授权上报|
+|6|*多租户隔离*|利用 VictoriaMetrics 的多租户能力（accountID），按团队划分数据隔离|
+
+----
+
+h2. 附录 A：VictoriaMetrics 中的指标命名映射
+
+Claude Code OTel SDK 原始指标名经过 OTLP 写入 VictoriaMetrics 后的转换：
+
+||OTel 原始名称||VictoriaMetrics 名称||
+|{{claude_code.session.count}}|{{claude_code_session_count_total}}|
+|{{claude_code.cost.usage}}|{{claude_code_cost_usage_USD_total}}|
+|{{claude_code.token.usage}}|{{claude_code_token_usage_tokens_total}}|
+|{{claude_code.lines_of_code.count}}|{{claude_code_lines_of_code_count_total}}|
+|{{claude_code.commit.count}}|{{claude_code_commit_count_total}}|
+|{{claude_code.pull_request.count}}|{{claude_code_pull_request_count_total}}|
+|{{claude_code.code_edit_tool.decision}}|{{claude_code_code_edit_tool_decision_total}}|
+
+*转换规则*：{{.}} → {{_}}，并根据单位和类型自动追加后缀（如 {{_USD_total}}、{{_tokens_total}}）。与 Prometheus 命名规则一致。
+
+h2. 附录 B：关键查询语句参考
+
+h3. MetricsQL / PromQL（VictoriaMetrics 指标查询）
+
+VictoriaMetrics 完全兼容 PromQL 语法，同时支持扩展的 MetricsQL。以下查询语句可直接使用：
+
+{code:language=sql|title=MetricsQL 示例}
+# 各模型累计费用
+sum by (model) (claude_code_cost_usage_USD_total)
+
+# Token 消耗速率（按类型，5 分钟窗口）
+sum by (type) (rate(claude_code_token_usage_tokens_total[5m]) * 60)
+
+# 代码增删速率
+sum by (type) (rate(claude_code_lines_of_code_count_total[5m]) * 60)
+
+# ── 以下为 Dashboard 面板使用的 1h 窗口查询 ──
+
+# 近 1 小时活跃会话数
+count(last_over_time(claude_code_session_count_total{}[1h]))
+
+# 近 1 小时累计费用
+sum(increase_pure(claude_code_cost_usage_USD_total{}[1h]))
+
+# 近 1 小时 Token 总用量
+sum(increase_pure(claude_code_token_usage_tokens_total{}[1h]))
+
+# 近 1 小时代码变更行数
+sum(increase_pure(claude_code_lines_of_code_count_total{}[1h]))
+
+# 近 1 小时 Commit 次数
+sum(increase_pure(claude_code_commit_count_total{}[1h])) or vector(0)
+
+# 近 1 小时 PR 次数
+sum(increase_pure(claude_code_pull_request_count_total{}[1h])) or vector(0)
+{code}
+
+h3. LogQL（Loki 事件查询）
+
+{code:language=sql|title=LogQL 示例}
+# 各工具调用频次（5 分钟窗口）
+sum by (tool_name) (
+  count_over_time({service_name="claude-code"} |= "claude_code.tool_result" [5m])
+)
+
+# 工具成功率（15 分钟窗口）
+100 * (
+  sum by (tool_name) (count_over_time(
+    {service_name="claude-code"} |= "claude_code.tool_result" | json | success="true" [15m]
+  ))
+) / (
+  sum by (tool_name) (count_over_time(
+    {service_name="claude-code"} |= "claude_code.tool_result" [15m]
+  ))
+)
+
+# API 平均响应耗时（按模型）
+avg by (model) (
+  avg_over_time(
+    {service_name="claude-code"} |= "claude_code.api_request" | unwrap duration_ms [$__interval]
+  )
+)
+
+# API 错误率（按状态码）
+sum by (status_code) (
+  rate({service_name="claude-code"} |= "claude_code.api_error" | json | __error__ = "" [$__interval])
+)
+{code}
+
+h2. 附录 C：Docker Compose 服务依赖关系
+
+{code:language=none|title=服务依赖}
+otel-collector  (无依赖，最先启动)
+      │                                    ┌──────────────────┐
+      │ Metrics (Push, Remote Write)     │  VictoriaMetrics │
+      ├───────────────────────────────────▶ │  (已有中间件)     │
+      │                                    └──────────────────┘
+      │
+      └──▶ loki
+             │
+             └──▶ /var/data/loki (宿主机持久化存储)
+{code}
+
+Docker Compose 中仅包含 2 个服务：
+* {{otel-collector}}：无依赖，最先启动
+* {{loki}}：无依赖，独立启动；数据持久化至宿主机 {{/var/data/loki}}
+
+VictoriaMetrics 在 Docker Compose 外部，Collector 通过宿主机 IP 访问。

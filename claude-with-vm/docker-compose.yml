@@ -11,7 +11,6 @@ services:
       - ./collector-config.yaml:/etc/otel/collector-config.yaml:ro
     ports:
       - "4317:4317"      # OTLP gRPC（Claude Code 推送入口）
-      - "4318:4318"      # OTLP HTTP（备用）
     restart: unless-stopped
     networks:
       - otel-network
@@ -19,9 +18,13 @@ services:
   loki:
     image: grafana/loki:latest
     container_name: loki
+    user: "0"
     ports:
       - "3100:3100"
-    command: -config.file=/etc/loki/local-config.yaml
+    command: -config.file=/etc/loki/loki-config.yaml
+    volumes:
+      - ./loki-config.yaml:/etc/loki/loki-config.yaml:ro
+      - /var/data/loki:/loki
     restart: unless-stopped
     networks:
       - otel-network

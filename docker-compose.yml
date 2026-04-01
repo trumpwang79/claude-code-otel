@@ -35,6 +35,8 @@ services:
     ports:
       - "3100:3100"
     command: -config.file=/etc/loki/local-config.yaml
+    volumes:
+      - /var/data/loki:/loki
     restart: unless-stopped
     networks:
       - otel-network
